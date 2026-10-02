@@ -71,11 +71,11 @@ A aplicação usa o conector `gsheets`:
 connection = st.connection("gsheets", type=GSheetsConnection)
 ```
 
-Se sua plataforma atual já utiliza esse nome, as mesmas credenciais podem ser aproveitadas. A conta de serviço precisa ter permissão de edição na planilha.
+A conta de serviço precisa ter permissão de edição na planilha.
 
 Para configurar um projeto separado:
 
-1. Copie `.streamlit/secrets.toml.example` para `.streamlit/secrets.toml`.
+1. Crie `.streamlit/secrets.toml`.
 2. Preencha os dados da conta de serviço e a planilha.
 3. Compartilhe a planilha com o e-mail informado em `client_email`, permitindo edição.
 
