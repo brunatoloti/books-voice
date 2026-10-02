@@ -1,0 +1,7 @@
+streamlit>=1.60,<2
+st-gsheets-connection>=0.1,<1
+pandas>=2.2,<3
+EbookLib>=0.20,<1
+beautifulsoup4>=4.13,<5
+edge-tts>=7.2,<8
+streamlit-authenticator>=0.4.2,<0.5
