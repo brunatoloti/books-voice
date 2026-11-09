@@ -1,16 +1,9 @@
 from __future__ import annotations
 
-import importlib
 import os
-from pathlib import Path
 
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
-
-import pdf_converter
-
-if getattr(pdf_converter, "CONVERTER_API_VERSION", 1) < 2:
-    pdf_converter = importlib.reload(pdf_converter)
 
 from auth import require_login
 from content_store import delete_saved_book, list_saved_books, load_saved_book, save_book_content
@@ -46,53 +39,6 @@ def parse_epub(content: bytes, filename: str) -> dict:
     return extract_epub(content, filename)
 
 
-@st.cache_data(show_spinner=False)
-def parse_pdf(
-    content: bytes,
-    password: str = "",
-    converter_version: int = pdf_converter.CONVERTER_API_VERSION,
-) -> dict:
-    del converter_version
-    return pdf_converter.extract_pdf(content, password)
-
-
-@st.cache_data(show_spinner=False)
-def build_epub_from_pdf(
-    pdf: dict,
-    title: str,
-    author: str,
-    pages_per_section: int,
-    formatting_mode: str,
-) -> bytes:
-    try:
-        return pdf_converter.create_epub(
-            pdf,
-            title,
-            author,
-            pages_per_section,
-            formatting_mode=formatting_mode,
-        )
-    except TypeError as exc:
-        message = str(exc)
-        stale_signature = (
-            "formatting_mode" in message
-            or "positional argument" in message
-        )
-        if not stale_signature:
-            raise
-
-        # Streamlit can reload app.py while keeping an imported module cached.
-        # Refresh the converter once when its function still has the old API.
-        refreshed_converter = importlib.reload(pdf_converter)
-        return refreshed_converter.create_epub(
-            pdf,
-            title,
-            author,
-            pages_per_section,
-            formatting_mode=formatting_mode,
-        )
-
-
 def reset_book_session() -> None:
     for key in (
         "active_book",
@@ -107,12 +53,6 @@ def reset_book_session() -> None:
 
 def mark_upload_unsaved() -> None:
     st.session_state.saved_upload_book_id = None
-
-
-def queue_converted_epub(content: bytes, name: str) -> None:
-    st.session_state.pending_epub = {"content": content, "name": name}
-    st.session_state.pop("epub_upload", None)
-    st.session_state.navigation_page = "Adicionar livro"
 
 
 def initialize_position(book: dict, saved: dict | None, owner_id: str) -> None:
@@ -375,32 +315,6 @@ def render_player(conn: GSheetsConnection, owner_id: str, book: dict) -> None:
                 st.rerun()
 
 
-def render_delete_book_control(
-    conn: GSheetsConnection,
-    owner_id: str,
-    book_id: str,
-) -> None:
-    with st.expander("Excluir este audiolivro"):
-        confirmed = st.checkbox(
-            "Confirmo a exclusão do conteúdo e do progresso.",
-            key=f"delete_confirm_{book_id}",
-        )
-        if st.button(
-            "Excluir definitivamente",
-            disabled=not confirmed,
-            key=f"delete_{book_id}",
-        ):
-            try:
-                delete_saved_book(conn, CONTENT_WORKSHEET, owner_id, book_id)
-                delete_book_progress(conn, PROGRESS_WORKSHEET, owner_id, book_id)
-            except Exception as exc:
-                st.error(f"Não foi possível excluir o audiolivro: {exc}")
-                return
-            reset_book_session()
-            st.success("Audiolivro excluído.")
-            st.rerun()
-
-
 def render_library(conn: GSheetsConnection, owner_id: str) -> None:
     st.title("Meus audiolivros")
     st.caption("Escolha um título salvo para continuar do ponto registrado.")
@@ -431,11 +345,6 @@ def render_library(conn: GSheetsConnection, owner_id: str) -> None:
         book = load_saved_book(conn, CONTENT_WORKSHEET, owner_id, selected_id)
     except Exception as exc:
         st.error(f"Não foi possível recuperar o conteúdo salvo: {exc}")
-        st.info(
-            "Se este cadastro não for recuperado automaticamente, exclua-o abaixo "
-            "e converta/cadastre novamente o PDF."
-        )
-        render_delete_book_control(conn, owner_id, selected_id)
         return
     if book is None:
         st.error("O audiolivro selecionado não foi encontrado.")
@@ -444,35 +353,39 @@ def render_library(conn: GSheetsConnection, owner_id: str) -> None:
     st.subheader(book["title"])
     st.caption(f"{book['author']} · {len(book['chapters'])} seções")
     render_player(conn, owner_id, book)
-    render_delete_book_control(conn, owner_id, selected_id)
+
+    with st.expander("Excluir este audiolivro"):
+        confirmed = st.checkbox(
+            "Confirmo a exclusão do conteúdo e do progresso.",
+            key=f"delete_confirm_{selected_id}",
+        )
+        if st.button(
+            "Excluir definitivamente",
+            disabled=not confirmed,
+            key=f"delete_{selected_id}",
+        ):
+            try:
+                delete_saved_book(conn, CONTENT_WORKSHEET, owner_id, selected_id)
+                delete_book_progress(conn, PROGRESS_WORKSHEET, owner_id, selected_id)
+            except Exception as exc:
+                st.error(f"Não foi possível excluir o audiolivro: {exc}")
+                return
+            reset_book_session()
+            st.success("Audiolivro excluído.")
+            st.rerun()
 
 
 def render_add_book(conn: GSheetsConnection, owner_id: str) -> None:
     st.title("Adicionar livro")
     st.caption("O EPUB é necessário somente neste primeiro cadastro.")
 
-    pending_epub = st.session_state.get("pending_epub")
-    if pending_epub:
-        st.success(
-            f"O arquivo convertido **{pending_epub['name']}** está pronto para cadastro."
-        )
-        if st.button("Descartar EPUB convertido", type="tertiary"):
-            st.session_state.pop("pending_epub", None)
-            st.rerun()
-
-    uploaded_file = st.file_uploader("Arquivo EPUB", type=["epub"], key="epub_upload")
-    if uploaded_file is not None:
-        uploaded_content = uploaded_file.getvalue()
-        uploaded_name = uploaded_file.name
-    elif pending_epub:
-        uploaded_content = pending_epub["content"]
-        uploaded_name = pending_epub["name"]
-    else:
+    uploaded_file = st.file_uploader("Arquivo EPUB", type=["epub"])
+    if uploaded_file is None:
         st.info("Selecione um EPUB para extrair e salvar as seções.")
         return
 
     try:
-        book = parse_epub(uploaded_content, uploaded_name)
+        book = parse_epub(uploaded_file.getvalue(), uploaded_file.name)
     except Exception as exc:
         st.error(f"Não foi possível abrir o EPUB: {exc}")
         return
@@ -517,7 +430,7 @@ def render_add_book(conn: GSheetsConnection, owner_id: str) -> None:
                     worksheet=CONTENT_WORKSHEET,
                     owner_id=owner_id,
                     book=book,
-                    file_name=uploaded_name,
+                    file_name=uploaded_file.name,
                 )
                 saved = load_book_progress(
                     conn,
@@ -561,150 +474,12 @@ def render_add_book(conn: GSheetsConnection, owner_id: str) -> None:
             st.error(f"Não foi possível salvar o audiolivro: {exc}")
             return
         reset_book_session()
-        if pending_epub and uploaded_file is None:
-            st.session_state.pop("pending_epub", None)
         st.session_state.saved_upload_book_id = book["book_id"]
         st.success("Audiolivro salvo. Nos próximos acessos, o EPUB não será necessário.")
 
     if st.session_state.get("saved_upload_book_id") == book["book_id"]:
         st.divider()
         render_player(conn, owner_id, book)
-
-
-def render_pdf_converter() -> None:
-    st.title("Converter PDF para EPUB")
-    st.caption(
-        "Converta um PDF com texto selecionável e use o EPUB gerado diretamente "
-        "no cadastro do audiolivro."
-    )
-
-    uploaded_file = st.file_uploader("Arquivo PDF", type=["pdf"], key="pdf_upload")
-    if uploaded_file is None:
-        st.info("Selecione um PDF para iniciar a conversão.")
-        return
-
-    password = st.text_input(
-        "Senha do PDF (se houver)",
-        type="password",
-        help="Deixe em branco quando o arquivo não for protegido.",
-    )
-    content = uploaded_file.getvalue()
-    try:
-        with st.spinner("Lendo o texto do PDF…"):
-            pdf = parse_pdf(content, password)
-    except Exception as exc:
-        st.error(f"Não foi possível abrir o PDF: {exc}")
-        return
-
-    source_key = pdf["source_id"]
-    if st.session_state.get("pdf_metadata_source") != source_key:
-        st.session_state.pdf_metadata_source = source_key
-        st.session_state.pdf_title_input = pdf["title"] or Path(uploaded_file.name).stem
-        st.session_state.pdf_author_input = pdf["author"] or "Autor não informado"
-        st.session_state.pop("converted_pdf_epub", None)
-
-    metric_columns = st.columns(3)
-    metric_columns[0].metric("Páginas", pdf["total_pages"])
-    metric_columns[1].metric("Páginas com texto", pdf["text_page_count"])
-    metric_columns[2].metric(
-        "Caracteres", f"{pdf['total_characters']:,}".replace(",", ".")
-    )
-
-    empty_count = len(pdf["empty_page_numbers"])
-    if empty_count:
-        st.warning(
-            f"{empty_count} página(s) sem texto selecionável serão ignoradas. "
-            "Se o conteúdo estiver em imagens, aplique OCR ao PDF antes de converter."
-        )
-
-    title_column, author_column = st.columns(2)
-    with title_column:
-        title = st.text_input("Nome do livro", key="pdf_title_input")
-    with author_column:
-        author = st.text_input("Autor", key="pdf_author_input")
-
-    pages_per_section = st.select_slider(
-        "Tamanho das seções",
-        options=[1, 5, 10, 15, 20, 30],
-        value=10,
-        format_func=lambda value: (
-            "1 página por seção" if value == 1 else f"{value} páginas por seção"
-        ),
-        help="As seções aparecem como capítulos no player do audiolivro.",
-    )
-
-    formatting_options = {
-        "Leitura adaptável — recomendada": "reflow",
-        "Preservar linhas e colunas": "lines",
-    }
-    formatting_label = st.selectbox(
-        "Formatação do EPUB",
-        options=list(formatting_options),
-        help=(
-            "A leitura adaptável identifica títulos, parágrafos, listas e tabelas "
-            "simples. O segundo modo mantém as quebras de linha do PDF e é mais "
-            "fiel, mas se adapta menos a telas pequenas."
-        ),
-    )
-    formatting_mode = formatting_options[formatting_label]
-
-    if st.button(
-        "Converter para EPUB",
-        type="primary",
-        use_container_width=True,
-        disabled=not title.strip() or not author.strip(),
-    ):
-        try:
-            with st.spinner("Criando o EPUB…"):
-                epub_content = build_epub_from_pdf(
-                    pdf,
-                    title.strip(),
-                    author.strip(),
-                    pages_per_section,
-                    formatting_mode,
-                )
-        except Exception as exc:
-            st.error(f"Não foi possível converter o PDF: {exc}")
-            return
-        st.session_state.converted_pdf_epub = {
-            "source_id": pdf["source_id"],
-            "content": epub_content,
-            "name": pdf_converter.epub_filename(uploaded_file.name),
-            "title": title.strip(),
-            "author": author.strip(),
-            "pages_per_section": pages_per_section,
-            "formatting_mode": formatting_mode,
-        }
-
-    converted = st.session_state.get("converted_pdf_epub")
-    if (
-        not converted
-        or converted["source_id"] != pdf["source_id"]
-        or converted["title"] != title.strip()
-        or converted["author"] != author.strip()
-        or converted["pages_per_section"] != pages_per_section
-        or converted["formatting_mode"] != formatting_mode
-    ):
-        return
-
-    st.success("EPUB criado. Você pode baixá-lo ou seguir direto para o cadastro.")
-    download_column, add_column = st.columns(2)
-    with download_column:
-        st.download_button(
-            "Baixar EPUB",
-            data=converted["content"],
-            file_name=converted["name"],
-            mime="application/epub+zip",
-            use_container_width=True,
-        )
-    with add_column:
-        st.button(
-            "Adicionar como audiolivro",
-            type="primary",
-            use_container_width=True,
-            on_click=queue_converted_epub,
-            args=(converted["content"], converted["name"]),
-        )
 
 
 def render_dashboard(conn: GSheetsConnection, owner_id: str) -> None:
@@ -790,8 +565,7 @@ with st.sidebar:
     st.write(f"Olá, **{display_name}**")
     page = st.radio(
         "Navegação",
-        ["Meus audiolivros", "Adicionar livro", "Converter PDF", "Dashboard"],
-        key="navigation_page",
+        ["Meus audiolivros", "Adicionar livro", "Dashboard"],
     )
     authenticator.logout(
         button_name="Sair",
@@ -804,8 +578,6 @@ connection = get_connection()
 
 if page == "Adicionar livro":
     render_add_book(connection, username)
-elif page == "Converter PDF":
-    render_pdf_converter()
 elif page == "Dashboard":
     render_dashboard(connection, username)
 else:

@@ -5,8 +5,6 @@ Aplicação em Streamlit que transforma arquivos EPUB em áudio por seção e re
 ## Recursos
 
 - upload de arquivos `.epub`;
-- conversão de PDF com texto selecionável para EPUB, com download ou envio
-  direto ao cadastro do audiolivro;
 - seções identificadas pelo sumário interno do EPUB, com alternativa baseada no *spine*;
 - união dos arquivos que pertencem ao mesmo capítulo;
 - descarte de páginas estruturais, como capa, créditos e sumário;
@@ -33,23 +31,6 @@ Aplicação em Streamlit que transforma arquivos EPUB em áudio por seção e re
 O player nativo do Streamlit não envia ao Python o segundo atual da reprodução. Por isso, cada seção é dividida em trechos de aproximadamente 2.800 caracteres. Ao clicar em **Concluir e avançar**, **Trecho anterior**, trocar de seção ou usar **Salvar este ponto**, a aplicação atualiza a planilha.
 
 A retomada ocorre no início do trecho salvo. Normalmente, cada trecho corresponde a poucos minutos de áudio.
-
-## Converter um PDF
-
-No menu **Converter PDF**, envie um arquivo que contenha texto selecionável,
-confira o nome do livro e o autor e escolha quantas páginas formarão cada seção.
-Depois da conversão, você pode baixar o `.epub` ou clicar em **Adicionar como
-audiolivro** para continuar diretamente no cadastro.
-
-O modo **Leitura adaptável** reorganiza o texto em títulos, parágrafos, listas,
-versos e tabelas simples, preservando as quebras de página e permitindo que o
-conteúdo se ajuste ao tamanho da tela. Para documentos em que o alinhamento é
-mais importante, o modo **Preservar linhas e colunas** mantém as quebras de linha
-do PDF, com menor capacidade de adaptação em telas pequenas.
-
-PDFs formados apenas por imagens precisam passar por OCR antes do envio. Páginas
-sem texto são informadas e ignoradas, e arquivos protegidos podem ser abertos
-com a senha no próprio formulário. Todo o processamento ocorre em memória.
 
 ## Instalação
 
@@ -190,6 +171,3 @@ pessoa na mesma aba.
 - A geração inicial de cada trecho exige internet. Depois, o resultado fica no cache enquanto a instância estiver ativa.
 - Imagens, fontes e diagramação do EPUB não são armazenadas; a plataforma salva os capítulos necessários para a narração.
 - EPUBs protegidos por DRM não são compatíveis.
-- A conversão de PDF não executa OCR nem preserva imagens ou a diagramação com
-  fidelidade absoluta; ela aproveita o texto selecionável e reconstrói parte da
-  estrutura para leitura e narração.
