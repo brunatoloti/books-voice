@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 import pandas as pd
 
 
-CONTENT_VERSION = 1
+CONTENT_VERSION = 2
 CHUNK_SIZE = 40_000
+PAYLOAD_PREFIX = "b64:"
 
 COLUMNS = [
     "owner_id",
@@ -33,7 +34,16 @@ def _empty_frame() -> pd.DataFrame:
 
 def read_content(conn, worksheet: str) -> pd.DataFrame:
     try:
-        frame = conn.read(worksheet=worksheet, ttl=0)
+        try:
+            frame = conn.read(
+                worksheet=worksheet,
+                ttl=0,
+                evaluate_formulas=False,
+            )
+        except TypeError as exc:
+            if "evaluate_formulas" not in str(exc):
+                raise
+            frame = conn.read(worksheet=worksheet, ttl=0)
     except Exception as exc:
         if exc.__class__.__name__ not in {"WorksheetNotFound", "SpreadsheetNotFound"}:
             raise
@@ -44,7 +54,33 @@ def read_content(conn, worksheet: str) -> pd.DataFrame:
     for column in COLUMNS:
         if column not in frame.columns:
             frame[column] = None
+    frame["payload"] = frame["payload"].map(_protect_payload)
     return frame[COLUMNS].copy()
+
+
+def _payload_data(value: object) -> str:
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return ""
+
+    chunk = str(value)
+    if chunk.startswith("'"):
+        chunk = chunk[1:]
+    if chunk.startswith(PAYLOAD_PREFIX):
+        return chunk[len(PAYLOAD_PREFIX) :]
+
+    # A legacy Base64 chunk beginning with '+' may have been interpreted as a
+    # Google Sheets formula. Reading with evaluate_formulas=False returns that
+    # formula beginning with '='; restore the original Base64 character.
+    if chunk.startswith("=+"):
+        return chunk[1:]
+    if chunk.startswith("="):
+        return f"+{chunk[1:]}"
+    return chunk
+
+
+def _protect_payload(value: object) -> str:
+    payload = _payload_data(value)
+    return f"{PAYLOAD_PREFIX}{payload}" if payload else ""
 
 
 def encode_book(book: dict, chunk_size: int = CHUNK_SIZE) -> list[str]:
@@ -56,14 +92,14 @@ def encode_book(book: dict, chunk_size: int = CHUNK_SIZE) -> list[str]:
     compressed = gzip.compress(raw, compresslevel=9, mtime=0)
     encoded = base64.b64encode(compressed).decode("ascii")
     return [
-        encoded[index : index + chunk_size]
+        _protect_payload(encoded[index : index + chunk_size])
         for index in range(0, len(encoded), chunk_size)
     ]
 
 
 def decode_book(chunks: list[str]) -> dict:
     try:
-        encoded = "".join(chunks)
+        encoded = "".join(_payload_data(chunk) for chunk in chunks)
         compressed = base64.b64decode(encoded.encode("ascii"), validate=True)
         raw = gzip.decompress(compressed)
         book = json.loads(raw.decode("utf-8"))
@@ -188,6 +224,21 @@ def save_book_content(
         if exc.__class__.__name__ != "WorksheetNotFound":
             raise
         conn.create(worksheet=worksheet, data=updated)
+
+    try:
+        saved_book = load_saved_book(
+            conn,
+            worksheet=worksheet,
+            owner_id=owner_id,
+            book_id=str(book["book_id"]),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "A planilha alterou o conteúdo durante a gravação. "
+            "O audiolivro não foi confirmado; tente salvá-lo novamente."
+        ) from exc
+    if saved_book is None:
+        raise ValueError("O conteúdo não foi encontrado após a gravação.")
 
 
 def delete_saved_book(conn, worksheet: str, owner_id: str, book_id: str) -> None:
