@@ -23,6 +23,8 @@ Aplicação em Streamlit que transforma arquivos EPUB em áudio por seção e re
 - cadastro do nome do livro e do autor no envio do EPUB;
 - dashboard individual com totais, progresso médio, gráfico e histórico dos livros.
 - biblioteca pessoal carregada após o login, sem novo envio do EPUB;
+- modos de áudio e leitura na mesma página, usando o conteúdo já importado;
+- leitura da seção completa com navegação e progresso compartilhado com o áudio;
 - conteúdo compactado em uma segunda aba do Google Sheets;
 - exclusão protegida por confirmação.
 

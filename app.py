@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import os
 
 import streamlit as st
@@ -14,6 +15,7 @@ from progress_store import (
     load_user_progress,
     save_book_progress,
 )
+from reading import chapter_paragraphs
 from speech import generate_audio
 
 
@@ -160,6 +162,26 @@ def move_position(book: dict, direction: int) -> bool:
     return False
 
 
+def move_chapter(book: dict, direction: int) -> bool:
+    """Move between complete sections in reading mode.
+
+    Returns True only when advancing past the final section, which marks the
+    book as completed.
+    """
+    chapter_index = st.session_state.chapter_index
+    if direction > 0:
+        if chapter_index + 1 < len(book["chapters"]):
+            st.session_state.chapter_index += 1
+            st.session_state.segment_index = 0
+            return False
+        return True
+
+    if chapter_index > 0:
+        st.session_state.chapter_index -= 1
+        st.session_state.segment_index = 0
+    return False
+
+
 def get_connection() -> GSheetsConnection:
     try:
         return st.connection("gsheets", type=GSheetsConnection)
@@ -171,109 +193,13 @@ def get_connection() -> GSheetsConnection:
         st.stop()
 
 
-def render_player(conn: GSheetsConnection, owner_id: str, book: dict) -> None:
-    try:
-        saved_progress = load_book_progress(
-            conn,
-            worksheet=PROGRESS_WORKSHEET,
-            owner_id=owner_id,
-            book_id=book["book_id"],
-        )
-    except Exception as exc:
-        st.error(f"Não foi possível carregar o progresso: {exc}")
-        return
-
-    initialize_position(book, saved_progress, owner_id)
-
-    if book.get("ignored_resources"):
-        ignored_names = ", ".join(book["ignored_resources"][:3])
-        remaining = len(book["ignored_resources"]) - 3
-        suffix = f" e outros {remaining}" if remaining > 0 else ""
-        st.warning(
-            "O EPUB continha recursos acessórios ausentes. Eles foram ignorados sem "
-            f"alterar os capítulos: {ignored_names}{suffix}."
-        )
-
-    if book.get("unresolved_toc_targets"):
-        st.info(
-            "Algumas referências do sumário interno não coincidiram com a ordem "
-            "do EPUB. Todo o texto encontrado foi mantido e validado."
-        )
-
-    with st.sidebar:
-        st.divider()
-        st.write(f"**{book['title']}**")
-        st.caption(book["author"])
-
-        chapter_options = list(range(len(book["chapters"])))
-        selected_chapter = st.selectbox(
-            "Capítulo ou seção",
-            options=chapter_options,
-            index=st.session_state.chapter_index,
-            format_func=lambda index: book["chapters"][index]["title"],
-            key=(
-                f"chapter_{owner_id}_{book['book_id']}_"
-                f"{st.session_state.chapter_index}"
-            ),
-        )
-        if selected_chapter != st.session_state.chapter_index:
-            st.session_state.chapter_index = selected_chapter
-            st.session_state.segment_index = 0
-            st.session_state.completed = False
-            persist(conn, book, owner_id)
-            st.rerun()
-
-        voice_ids = list(VOICES)
-        selected_voice = st.selectbox(
-            "Voz",
-            options=voice_ids,
-            index=voice_ids.index(st.session_state.voice)
-            if st.session_state.voice in voice_ids
-            else 0,
-            format_func=lambda voice_id: VOICES[voice_id],
-            key=f"voice_{book['book_id']}",
-        )
-        st.session_state.voice = selected_voice
-
-        rate_labels = list(RATES)
-        current_rate_label = next(
-            (label for label, value in RATES.items() if value == st.session_state.rate),
-            "1×",
-        )
-        selected_rate_label = st.selectbox(
-            "Velocidade da voz",
-            options=rate_labels,
-            index=rate_labels.index(current_rate_label),
-            key=f"rate_{book['book_id']}",
-        )
-        st.session_state.rate = RATES[selected_rate_label]
-
-    chapter = book["chapters"][st.session_state.chapter_index]
-    st.session_state.segment_index = min(
-        st.session_state.segment_index, len(chapter["segments"]) - 1
-    )
+def render_listening_mode(
+    conn: GSheetsConnection,
+    owner_id: str,
+    book: dict,
+    chapter: dict,
+) -> None:
     segment = chapter["segments"][st.session_state.segment_index]
-
-    progress = 100.0 if st.session_state.completed else calculate_progress(
-        book,
-        st.session_state.chapter_index,
-        st.session_state.segment_index,
-    )
-    st.progress(progress / 100, text=f"{progress:.1f}% concluído".replace(".", ","))
-
-    header_left, header_right = st.columns([4, 1])
-    with header_left:
-        st.caption(
-            f"Seção {st.session_state.chapter_index + 1} de {len(book['chapters'])} · "
-            f"trecho {st.session_state.segment_index + 1} de {len(chapter['segments'])}"
-        )
-        st.header(chapter["title"])
-    with header_right:
-        if saved_progress:
-            st.metric(
-                "Salvo na planilha",
-                f"{float(saved_progress['progress_percent']):.1f}%",
-            )
 
     with st.spinner("Gerando o áudio deste trecho…"):
         try:
@@ -313,6 +239,205 @@ def render_player(conn: GSheetsConnection, owner_id: str, book: dict) -> None:
                 st.success("Livro concluído e registrado na planilha.")
             else:
                 st.rerun()
+
+
+def render_reading_mode(
+    conn: GSheetsConnection,
+    owner_id: str,
+    book: dict,
+    chapter: dict,
+) -> None:
+    paragraphs = chapter_paragraphs(chapter)
+    if not paragraphs:
+        st.warning("Esta seção não possui texto disponível para leitura.")
+        return
+
+    st.caption(
+        "Na leitura, o progresso é salvo por seção. Use o botão abaixo quando "
+        "terminar esta seção."
+    )
+    body = "".join(f"<p>{html.escape(paragraph)}</p>" for paragraph in paragraphs)
+    st.markdown(
+        f"""
+        <style>
+            .ebook-reader {{
+                max-width: 780px;
+                margin: 1.25rem auto 2rem auto;
+                font-family: Georgia, 'Times New Roman', serif;
+                font-size: 1.18rem;
+                line-height: 1.85;
+            }}
+            .ebook-reader p {{
+                margin: 0 0 1.15em 0;
+                text-align: left;
+            }}
+        </style>
+        <article class="ebook-reader">{body}</article>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    previous_col, save_col, next_col = st.columns([1, 1.2, 1])
+    with previous_col:
+        if st.button(
+            "Seção anterior",
+            disabled=st.session_state.chapter_index == 0,
+            use_container_width=True,
+        ):
+            move_chapter(book, -1)
+            persist(conn, book, owner_id)
+            st.rerun()
+
+    with save_col:
+        if st.button(
+            "Salvar progresso",
+            type="secondary",
+            use_container_width=True,
+            key="save_reading_progress",
+        ):
+            persist(conn, book, owner_id)
+            st.success("Progresso salvo no Google Sheets.")
+
+    last_chapter = st.session_state.chapter_index == len(book["chapters"]) - 1
+    with next_col:
+        if st.button(
+            "Concluir livro" if last_chapter else "Concluir seção e avançar",
+            type="primary",
+            use_container_width=True,
+            key="next_reading_section",
+        ):
+            finished = move_chapter(book, 1)
+            persist(conn, book, owner_id, completed=finished)
+            if finished:
+                st.balloons()
+                st.success("Livro concluído e registrado na planilha.")
+            else:
+                st.rerun()
+
+
+def render_player(conn: GSheetsConnection, owner_id: str, book: dict) -> None:
+    try:
+        saved_progress = load_book_progress(
+            conn,
+            worksheet=PROGRESS_WORKSHEET,
+            owner_id=owner_id,
+            book_id=book["book_id"],
+        )
+    except Exception as exc:
+        st.error(f"Não foi possível carregar o progresso: {exc}")
+        return
+
+    initialize_position(book, saved_progress, owner_id)
+
+    if book.get("ignored_resources"):
+        ignored_names = ", ".join(book["ignored_resources"][:3])
+        remaining = len(book["ignored_resources"]) - 3
+        suffix = f" e outros {remaining}" if remaining > 0 else ""
+        st.warning(
+            "O EPUB continha recursos acessórios ausentes. Eles foram ignorados sem "
+            f"alterar os capítulos: {ignored_names}{suffix}."
+        )
+
+    if book.get("unresolved_toc_targets"):
+        st.info(
+            "Algumas referências do sumário interno não coincidiram com a ordem "
+            "do EPUB. Todo o texto encontrado foi mantido e validado."
+        )
+
+    mode_key = f"player_mode_{owner_id}_{book['book_id']}"
+    current_mode = st.session_state.get(mode_key, "Ouvir")
+
+    with st.sidebar:
+        st.divider()
+        st.write(f"**{book['title']}**")
+        st.caption(book["author"])
+
+        chapter_options = list(range(len(book["chapters"])))
+        selected_chapter = st.selectbox(
+            "Capítulo ou seção",
+            options=chapter_options,
+            index=st.session_state.chapter_index,
+            format_func=lambda index: book["chapters"][index]["title"],
+            key=(
+                f"chapter_{owner_id}_{book['book_id']}_"
+                f"{st.session_state.chapter_index}"
+            ),
+        )
+        if selected_chapter != st.session_state.chapter_index:
+            st.session_state.chapter_index = selected_chapter
+            st.session_state.segment_index = 0
+            st.session_state.completed = False
+            persist(conn, book, owner_id)
+            st.rerun()
+
+        if current_mode == "Ouvir":
+            voice_ids = list(VOICES)
+            selected_voice = st.selectbox(
+                "Voz",
+                options=voice_ids,
+                index=voice_ids.index(st.session_state.voice)
+                if st.session_state.voice in voice_ids
+                else 0,
+                format_func=lambda voice_id: VOICES[voice_id],
+                key=f"voice_{book['book_id']}",
+            )
+            st.session_state.voice = selected_voice
+
+            rate_labels = list(RATES)
+            current_rate_label = next(
+                (label for label, value in RATES.items() if value == st.session_state.rate),
+                "1×",
+            )
+            selected_rate_label = st.selectbox(
+                "Velocidade da voz",
+                options=rate_labels,
+                index=rate_labels.index(current_rate_label),
+                key=f"rate_{book['book_id']}",
+            )
+            st.session_state.rate = RATES[selected_rate_label]
+
+    chapter = book["chapters"][st.session_state.chapter_index]
+    st.session_state.segment_index = min(
+        st.session_state.segment_index, len(chapter["segments"]) - 1
+    )
+    progress = 100.0 if st.session_state.completed else calculate_progress(
+        book,
+        st.session_state.chapter_index,
+        st.session_state.segment_index,
+    )
+    st.progress(progress / 100, text=f"{progress:.1f}% concluído".replace(".", ","))
+
+    header_left, header_right = st.columns([4, 1])
+    with header_left:
+        location = (
+            f"Seção {st.session_state.chapter_index + 1} de {len(book['chapters'])}"
+        )
+        if current_mode == "Ouvir":
+            location += (
+                f" · trecho {st.session_state.segment_index + 1} "
+                f"de {len(chapter['segments'])}"
+            )
+        st.caption(location)
+        st.header(chapter["title"])
+    with header_right:
+        if saved_progress:
+            st.metric(
+                "Salvo na planilha",
+                f"{float(saved_progress['progress_percent']):.1f}%",
+            )
+
+    selected_mode = st.segmented_control(
+        "Modo",
+        options=["Ouvir", "Ler"],
+        default=current_mode,
+        format_func=lambda mode: "🎧 Ouvir" if mode == "Ouvir" else "📖 Ler",
+        key=mode_key,
+        label_visibility="collapsed",
+    )
+    if selected_mode == "Ler":
+        render_reading_mode(conn, owner_id, book, chapter)
+    else:
+        render_listening_mode(conn, owner_id, book, chapter)
 
 
 def render_library(conn: GSheetsConnection, owner_id: str) -> None:
